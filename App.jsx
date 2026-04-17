@@ -50,7 +50,7 @@ function App() {
         formData.append("files", file);
       });
 
-      const res = await fetch("http://localhost:5000/query", {
+      const res = await fetch("https://nl-to-sql-project.onrender.com/query", {
         method: "POST",
         body: formData,
       });

@@ -3,8 +3,11 @@ import psycopg2
 import pandas as pd
 import json
 import re
+import os
 
-# 🔹 PostgreSQL Connection
+# ==============================
+# 🔥 SAFE DB CONNECTION
+# ==============================
 conn = psycopg2.connect(
     database="postgres",
     user="postgres",
@@ -15,7 +18,7 @@ conn = psycopg2.connect(
 cursor = conn.cursor()
 
 # ==============================
-# 🔥 1. CLEAN SQL OUTPUT
+# 🔥 CLEAN SQL OUTPUT
 # ==============================
 def clean_sql_output(raw_output):
     raw_output = re.sub(r'\x1B\[[0-?]*[ -/]*[@-~]', '', raw_output)
@@ -27,58 +30,82 @@ def clean_sql_output(raw_output):
 
     return raw_output.strip()
 
-
 # ==============================
-# 🔥 2. LOAD CSV (AUTO TYPE FIX)
+# 🔥 SAFE CSV LOADING
 # ==============================
 def load_csv_to_db(file_path, table_name):
-    df = pd.read_csv(file_path)
+    try:
+        print("DEBUG PATH:", file_path)
+        print("CURRENT DIR:", os.getcwd())
 
-    col_defs = []
-    for col in df.columns:
-        if pd.api.types.is_numeric_dtype(df[col]):
-            col_defs.append(f"{col} NUMERIC")
-        else:
-            col_defs.append(f"{col} TEXT")
+        # 🔥 FIX PATH (ABSOLUTE)
+        file_path = os.path.abspath(file_path)
 
-    cursor.execute(f'DROP TABLE IF EXISTS "{table_name}";')
-    cursor.execute(f'CREATE TABLE "{table_name}" ({", ".join(col_defs)});')
+        print("ABS PATH:", file_path)
+        print("FILE EXISTS:", os.path.exists(file_path))
 
-    for _, row in df.iterrows():
-        values = [None if pd.isna(v) else v for v in row]
-        placeholders = ", ".join(["%s"] * len(values))
-        cursor.execute(
-            f'INSERT INTO "{table_name}" VALUES ({placeholders});',
-            values
-        )
+        if not os.path.exists(file_path):
+            print("❌ FILE NOT FOUND - SKIPPING")
+            return
 
-    conn.commit()
+        df = pd.read_csv(file_path)
+
+        if df.empty:
+            print("⚠️ CSV EMPTY")
+            return
+
+        # 🔥 AUTO TYPE DETECTION
+        col_defs = []
+        for col in df.columns:
+            if pd.api.types.is_numeric_dtype(df[col]):
+                col_defs.append(f'"{col}" NUMERIC')
+            else:
+                col_defs.append(f'"{col}" TEXT')
+
+        cursor.execute(f'DROP TABLE IF EXISTS "{table_name}";')
+        cursor.execute(f'CREATE TABLE "{table_name}" ({", ".join(col_defs)});')
+
+        # 🔥 INSERT DATA
+        for _, row in df.iterrows():
+            values = [None if pd.isna(v) else v for v in row]
+            placeholders = ", ".join(["%s"] * len(values))
+
+            cursor.execute(
+                f'INSERT INTO "{table_name}" VALUES ({placeholders});',
+                values
+            )
+
+        conn.commit()
+        print(f"✅ Loaded table: {table_name}")
+
+    except Exception as e:
+        print("❌ CSV LOAD ERROR:", str(e))
 
 
 # ==============================
-# 🔥 3. CREATE TABLE FROM SCHEMA
+# 🔥 CREATE TABLE FROM SCHEMA
 # ==============================
 def create_tables_from_schema(tables):
     for table in tables:
-        name = table["name"].strip()
+        name = table.get("name", "").strip()
+        cols = table.get("columns", [])
 
-        if not name:
-            continue
-
-        cols = table["columns"]
-        if not cols:
+        if not name or not cols:
             continue
 
         col_defs = ", ".join([f'"{col.strip()}" TEXT' for col in cols])
 
-        cursor.execute(f'DROP TABLE IF EXISTS "{name}";')
-        cursor.execute(f'CREATE TABLE "{name}" ({col_defs});')
+        try:
+            cursor.execute(f'DROP TABLE IF EXISTS "{name}";')
+            cursor.execute(f'CREATE TABLE "{name}" ({col_defs});')
+        except Exception as e:
+            print("❌ TABLE CREATE ERROR:", e)
 
     conn.commit()
 
 
 # ==============================
-# 🔥 4. BUILD SCHEMA STRING
+# 🔥 BUILD SCHEMA
 # ==============================
 def build_schema(tables):
     schema = ""
@@ -88,29 +115,11 @@ def build_schema(tables):
 
 
 # ==============================
-# 🔥 5. FIND RELATIONSHIPS
-# ==============================
-def find_relationships(tables):
-    relations = set()
-
-    for t1 in tables:
-        for t2 in tables:
-            if t1 == t2:
-                continue
-
-            for col in t1['columns']:
-                if col in t2['columns']:
-                    relations.add(f"{t1['name']}.{col} = {t2['name']}.{col}")
-
-    return list(relations)
-
-
-# ==============================
-# 🔥 6. DETECT TABLE FROM QUERY
+# 🔥 DETECT TABLE
 # ==============================
 def detect_table(query, tables):
-    if not tables or len(tables) == 0:
-        return None   # 🔥 SAFE RETURN
+    if not tables:
+        return None
 
     query = query.lower()
 
@@ -120,8 +129,9 @@ def detect_table(query, tables):
 
     return tables[0]["name"]
 
+
 # ==============================
-# 🔥 7. FIX TABLE NAME (AI ERROR)
+# 🔥 FIX WRONG TABLE NAMES
 # ==============================
 def fix_table_name(sql, tables):
     valid_tables = [t["name"] for t in tables]
@@ -133,27 +143,16 @@ def fix_table_name(sql, tables):
 
 
 # ==============================
-# 🔥 8. GENERATE SQL (LLM)
+# 🔥 GENERATE SQL
 # ==============================
-def generate_sql(user_query, schema, relations):
+def generate_sql(user_query, schema):
     prompt = f"""
-You are an expert SQL generator.
-
-STRICT RULES:
-- Use ONLY given tables
-- Do NOT invent tables
-- Return ONLY SQL query
-- No explanation
-- No text
-- No markdown
+Return ONLY SQL query.
 
 Tables:
 {schema}
 
-Relationships:
-{relations}
-
-User Question:
+Question:
 {user_query}
 """
 
@@ -168,56 +167,50 @@ User Question:
 
 
 # ==============================
-# 🔥 9. SAFE EXECUTION
+# 🔥 EXECUTE SQL
 # ==============================
 def execute_sql(sql):
     try:
         cursor.execute(sql)
-        rows = cursor.fetchall()
-        return rows
+        return cursor.fetchall()
     except Exception as e:
         return f"Error: {e}"
 
 
 # ==============================
-# 🔥 10. EXPLANATION
+# 🔥 EXPLAIN SQL
 # ==============================
 def explain_sql(sql):
-    prompt = f"Explain this SQL in 2 simple lines:\n{sql}"
-
-    result = subprocess.run(
-        ["ollama", "run", "llama3"],
-        input=prompt,
-        text=True,
-        capture_output=True
-    )
-
-    return result.stdout.strip()
+    try:
+        result = subprocess.run(
+            ["ollama", "run", "llama3"],
+            input=f"Explain this SQL in 2 lines:\n{sql}",
+            text=True,
+            capture_output=True
+        )
+        return result.stdout.strip()
+    except:
+        return "Explanation unavailable"
 
 
 # ==============================
-# 🔥 11. MAIN INTELLIGENCE
+# 🔥 MAIN PIPELINE
 # ==============================
 def ai_pipeline(tables, query):
     schema = build_schema(tables)
-    relations = find_relationships(tables)
-
     table = detect_table(query, tables)
-    if table is None:
-        return (
-        "No table found",
-        [],
-        "Please upload a CSV file or enter table structure first."
-        )
+
+    if not table:
+        return "No table", [], "Upload CSV or define table"
+
     q = query.lower()
 
-    # ✅ COUNT
     if "count" in q:
         sql = f'SELECT COUNT(*) FROM "{table}";'
 
-    # ✅ AGE CONDITION
     elif "age" in q and ("above" in q or "greater" in q):
         num = re.findall(r'\d+', q)
+
         if num:
             age = num[0]
             if "name" in q:
@@ -228,7 +221,7 @@ def ai_pipeline(tables, query):
             sql = f'SELECT * FROM "{table}";'
 
     else:
-        sql = generate_sql(query, schema, relations)
+        sql = generate_sql(query, schema)
         sql = fix_table_name(sql, tables)
 
     result = execute_sql(sql)
@@ -241,33 +234,39 @@ def ai_pipeline(tables, query):
 # 🔥 MAIN RUNNER
 # ==============================
 if __name__ == "__main__":
-    with open("input.json", "r") as f:
-        data = json.load(f)
+    try:
+        with open("input.json", "r") as f:
+            data = json.load(f)
 
-    query = data["query"]
-    tables = data["tables"]
-    csv_files = data.get("csv_files", [])
-    # 🔥 AUTO CREATE TABLE INFO FROM CSV
-    if (not tables or len(tables) == 0) and csv_files:
-        tables = [{"name": file["name"], "columns": []} for file in csv_files]
-    # CSV MODE
-    for file in csv_files:
-        load_csv_to_db(file["path"], file["name"])
+        query = data.get("query", "")
+        tables = data.get("tables", [])
+        csv_files = data.get("csv_files", [])
 
-    # STRUCTURE MODE
-    if not csv_files:
-        create_tables_from_schema(tables)
+        # 🔥 AUTO TABLE FROM CSV
+        if not tables and csv_files:
+            tables = [{"name": f["name"], "columns": []} for f in csv_files]
 
-    sql, result, explanation = ai_pipeline(tables, query)
+        # 🔥 LOAD CSV
+        for file in csv_files:
+            load_csv_to_db(file["path"], file["name"])
 
-    print("SQL_START")
-    print(sql)
-    print("SQL_END")
+        # 🔥 STRUCTURE MODE
+        if not csv_files:
+            create_tables_from_schema(tables)
 
-    print("RESULT_START")
-    print(result)
-    print("RESULT_END")
+        sql, result, explanation = ai_pipeline(tables, query)
 
-    print("EXPLANATION_START")
-    print(explanation)
-    print("EXPLANATION_END")
+        print("SQL_START")
+        print(sql)
+        print("SQL_END")
+
+        print("RESULT_START")
+        print(result)
+        print("RESULT_END")
+
+        print("EXPLANATION_START")
+        print(explanation)
+        print("EXPLANATION_END")
+
+    except Exception as e:
+        print("FATAL ERROR:", str(e))
