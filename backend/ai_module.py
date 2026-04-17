@@ -8,14 +8,11 @@ import os
 # ==============================
 # 🔥 SAFE DB CONNECTION
 # ==============================
-conn = psycopg2.connect(
-    database="postgres",
-    user="postgres",
-    password="1029",
-    host="localhost",
-    port="5432"
-)
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+conn = psycopg2.connect(DATABASE_URL)
 cursor = conn.cursor()
+
 
 # ==============================
 # 🔥 CLEAN SQL OUTPUT
